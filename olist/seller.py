@@ -1,4 +1,3 @@
-
 import pandas as pd
 import numpy as np
 from olist.data import Olist
@@ -141,8 +140,25 @@ class Seller:
         Returns a DataFrame with:
         'seller_id', 'share_of_five_stars', 'share_of_one_stars', 'review_score'
         """
+        # Order-grain review flags (built earlier in olist/order.py):
+        # order_id, dim_is_five_star, dim_is_one_star, review_score
+        orders_reviews = self.order.get_review_score()
 
-        pass  # YOUR CODE HERE
+        # Attach seller_id by joining to order_items (one row per item).
+        # An order can contain several sellers, so this fans the review out
+        # to every seller involved in that order.
+        matching_table = self.data['order_items'][['order_id', 'seller_id']]
+        df = matching_table.merge(orders_reviews, on='order_id')
+
+        # Aggregate to seller grain. Mean of a 0/1 flag = the share of that flag.
+        df = df.groupby('seller_id', as_index=False).agg({
+            'dim_is_five_star': 'mean',
+            'dim_is_one_star': 'mean',
+            'review_score': 'mean'
+        })
+        df.columns = ['seller_id', 'share_of_five_stars',
+                      'share_of_one_stars', 'review_score']
+        return df
 
     def get_training_data(self):
         """

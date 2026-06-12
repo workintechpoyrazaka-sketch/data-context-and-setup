@@ -138,7 +138,8 @@ class Seller:
     def get_review_score(self):
         """
         Returns a DataFrame with:
-        'seller_id', 'share_of_five_stars', 'share_of_one_stars', 'review_score'
+        'seller_id', 'share_of_five_stars', 'share_of_one_stars',
+        'review_score', 'cost_of_reviews'
         """
         # Order-grain review flags (built earlier in olist/order.py):
         # order_id, dim_is_five_star, dim_is_one_star, review_score
@@ -150,23 +151,37 @@ class Seller:
         matching_table = self.data['order_items'][['order_id', 'seller_id']]
         df = matching_table.merge(orders_reviews, on='order_id')
 
-        # Aggregate to seller grain. Mean of a 0/1 flag = the share of that flag.
-        df = df.groupby('seller_id', as_index=False).agg({
+        # --- Shares & mean score: UNCHANGED (kept on the fan-out grain, so the
+        # previously-graded shape/median are preserved). Mean of a 0/1 flag =
+        # the share of that flag.
+        df_scores = df.groupby('seller_id', as_index=False).agg({
             'dim_is_five_star': 'mean',
             'dim_is_one_star': 'mean',
             'review_score': 'mean'
         })
-        df.columns = ['seller_id', 'share_of_five_stars',
-                      'share_of_one_stars', 'review_score']
-        return df
+        df_scores.columns = ['seller_id', 'share_of_five_stars',
+                             'share_of_one_stars', 'review_score']
+
+        # --- Reputation cost: NEW. Map each order's score to a BRL cost, then
+        # sum per seller. Dedupe to one row per (order_id, seller_id) first so a
+        # multi-item order is charged its review cost ONCE per seller, not once
+        # per item. A bad order still reflects on every seller in it (full cost
+        # to each), but never multiple times for the same seller.
+        review_cost = {1: 100, 2: 50, 3: 40, 4: 0, 5: 0}
+        cost = df.drop_duplicates(subset=['order_id', 'seller_id']).copy()
+        cost['cost_of_reviews'] = cost['review_score'].map(review_cost)
+        cost = cost.groupby('seller_id', as_index=False)['cost_of_reviews'].sum()
+
+        return df_scores.merge(cost, on='seller_id')
 
     def get_training_data(self):
         """
         Returns a DataFrame with:
         ['seller_id', 'seller_city', 'seller_state', 'delay_to_carrier',
-        'wait_time', 'date_first_sale', 'date_last_sale', 'months_on_olist', 'share_of_one_stars',
-        'share_of_five_stars', 'review_score', 'n_orders', 'quantity',
-        'quantity_per_order', 'sales']
+        'wait_time', 'date_first_sale', 'date_last_sale', 'months_on_olist',
+        'share_of_one_stars', 'share_of_five_stars', 'review_score',
+        'cost_of_reviews', 'n_orders', 'quantity', 'quantity_per_order',
+        'sales', 'revenues', 'profits']
         """
 
         training_set =\
@@ -184,5 +199,19 @@ class Seller:
         if self.get_review_score() is not None:
             training_set = training_set.merge(self.get_review_score(),
                                               on='seller_id')
+
+        # --- P&L columns (CEO request) ---------------------------------------
+        # Revenue = subscription (80 BRL / month on platform)
+        #         + sales fee (10% of product price, freight excluded).
+        training_set['revenues'] = (
+            training_set['months_on_olist'] * 80
+            + training_set['sales'] * 0.10
+        )
+        # Profit BEFORE IT costs. IT cost is a GLOBAL, cumulative figure
+        # (scales with sqrt of TOTAL sellers & items), so it is computed in the
+        # notebook on cumulative sums, not as a per-seller column here.
+        training_set['profits'] = (
+            training_set['revenues'] - training_set['cost_of_reviews']
+        )
 
         return training_set
